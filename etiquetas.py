@@ -7,7 +7,9 @@ import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
+
+CodigoEtiqueta = Literal["barcode", "qrcode"]
 
 from openpyxl import load_workbook
 
@@ -15,7 +17,9 @@ from openpyxl import load_workbook
 DEFAULT_PRINTER = "ZDesigner GK420d"
 _BASE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(_BASE, "historico.txt")
-PRINTER_PREFS = os.path.join(_BASE, "impressora_preferida.txt")
+CONFIG_FILE = os.path.join(_BASE, "Config.txt")
+_PRINTER_PREFS_LEGACY = os.path.join(_BASE, "impressora_preferida.txt")
+_CODIGO_PREFS_LEGACY = os.path.join(_BASE, "codigo_etiqueta_preferido.txt")
 # Coloque artigos.xlsx na mesma pasta que o .exe (ou este .py).
 ARTIGOS_XLSX = os.path.join(_BASE, "artigos.xlsx")
 
@@ -94,48 +98,149 @@ def listar_impressoras() -> list[str]:
     return out
 
 
-def _carregar_impressora_preferida() -> Optional[str]:
+def _parse_config(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, _, v = line.partition("=")
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def _format_config(data: dict[str, str]) -> str:
+    impressora = data.get("impressora", "")
+    codigo = data.get("codigo", "barcode").lower()
+    if codigo != "qrcode":
+        codigo = "barcode"
+    return f"impressora={impressora}\ncodigo={codigo}\n"
+
+
+def _ler_config_ficheiro() -> dict[str, str]:
     try:
-        with open(PRINTER_PREFS, encoding="utf-8") as f:
-            s = f.read().strip()
-        return s or None
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return _parse_config(f.read())
     except OSError:
-        return None
+        return {}
 
 
-def _guardar_impressora_preferida(name: str) -> None:
+def _migrar_prefs_legado() -> dict[str, str]:
+    data: dict[str, str] = {}
     try:
-        with open(PRINTER_PREFS, "w", encoding="utf-8") as f:
-            f.write(name)
+        with open(_PRINTER_PREFS_LEGACY, encoding="utf-8") as f:
+            s = f.read().strip()
+            if s:
+                data["impressora"] = s
+    except OSError:
+        pass
+    try:
+        with open(_CODIGO_PREFS_LEGACY, encoding="utf-8") as f:
+            s = f.read().strip().lower()
+            if s == "qrcode":
+                data["codigo"] = "qrcode"
+            elif s:
+                data["codigo"] = "barcode"
+    except OSError:
+        pass
+    return data
+
+
+def _escrever_config(data: dict[str, str]) -> None:
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            f.write(_format_config(data))
     except OSError:
         pass
 
 
-def gerar_zpl(sn: str, codigo_artigo: str, descricao: str) -> str:
+def _carregar_config() -> dict[str, str]:
+    if os.path.isfile(CONFIG_FILE):
+        return _ler_config_ficheiro()
+    legacy = _migrar_prefs_legado()
+    if legacy:
+        _escrever_config(legacy)
+    return legacy
+
+
+def _guardar_config(
+    *,
+    impressora: Optional[str] = None,
+    codigo: Optional[CodigoEtiqueta] = None,
+) -> None:
+    data = _carregar_config()
+    if impressora is not None:
+        data["impressora"] = impressora
+    if codigo is not None:
+        data["codigo"] = codigo
+    _escrever_config(data)
+
+
+def _carregar_impressora_preferida() -> Optional[str]:
+    s = _carregar_config().get("impressora", "").strip()
+    return s or None
+
+
+def _guardar_impressora_preferida(name: str) -> None:
+    _guardar_config(impressora=name)
+
+
+def _carregar_codigo_preferido() -> CodigoEtiqueta:
+    if _carregar_config().get("codigo", "").lower() == "qrcode":
+        return "qrcode"
+    return "barcode"
+
+
+def _guardar_codigo_preferido(tipo: CodigoEtiqueta) -> None:
+    _guardar_config(codigo=tipo)
+
+
+def gerar_zpl(
+    sn: str,
+    codigo_artigo: str,
+    descricao: str,
+    codigo_tipo: CodigoEtiqueta = "barcode",
+) -> str:
     desc = _zpl_safe(descricao)
     cod = _zpl_safe(codigo_artigo)
+    sn_s = _zpl_safe(sn)
+    if codigo_tipo == "qrcode":
+        codigo_sn = f"^FO200,30^BQN,2,4^FDMA,{sn_s}^FS"
+        y_desc, y_cod = 220, 265
+        ll = 300
+    else:
+        codigo_sn = f"^FO40,95^BY2,3,72^BCN,72,Y,N,N^FD{sn_s}^FS"
+        y_desc, y_cod = 220, 265
+        ll = 300
     return f"""
 ^XA
 ^PW560
-^LL300
+^LL{ll}
 
 ^FO20,20^XGLOGO.GRF,1,1^FS
 
 ^FO40,55^A0N,30,30^FDSN:^FS
-^FO140,55^A0N,30,30^FD{sn}^FS
+^FO140,55^A0N,30,30^FD{sn_s}^FS
 
-^FO40,95^BY2,3,72^BCN,72,Y,N,N^FD{sn}^FS
+{codigo_sn}
 
-^FO40,220^A0N,26,26^FD{desc}^FS
+^FO40,{y_desc}^A0N,26,26^FD{desc}^FS
 
-^FO40,265^A0N,22,22^FD{cod}^FS
+^FO40,{y_cod}^A0N,22,22^FD{cod}^FS
 
 ^XZ
 """
 
 
-def imprimir(sn: str, codigo_artigo: str, descricao: str, printer_name: str) -> None:
-    zpl = gerar_zpl(sn, codigo_artigo, descricao)
+def imprimir(
+    sn: str,
+    codigo_artigo: str,
+    descricao: str,
+    printer_name: str,
+    codigo_tipo: CodigoEtiqueta = "barcode",
+) -> None:
+    zpl = gerar_zpl(sn, codigo_artigo, descricao, codigo_tipo)
 
     hPrinter = win32print.OpenPrinter(printer_name)
     try:
@@ -180,8 +285,8 @@ def main() -> None:
 
     root = tk.Tk()
     root.title("Etiquetas — Logística PT")
-    root.geometry("520x430")
-    root.minsize(480, 390)
+    root.geometry("520x470")
+    root.minsize(480, 430)
 
     frm = tk.Frame(root, padx=12, pady=10)
     frm.pack(fill=tk.BOTH, expand=True)
@@ -262,6 +367,17 @@ def main() -> None:
     )
     lbl_desc.pack(anchor="w", pady=(0, 10))
 
+    tk.Label(frm, text="Código na etiqueta", font=("Arial", 11)).pack(anchor="w")
+    row_cod = tk.Frame(frm)
+    row_cod.pack(fill=tk.X, pady=(0, 8))
+    codigo_tipo_var = tk.StringVar(value=_carregar_codigo_preferido())
+    ttk.Radiobutton(row_cod, text="Código de barras", variable=codigo_tipo_var, value="barcode").pack(
+        side=tk.LEFT
+    )
+    ttk.Radiobutton(row_cod, text="QR Code", variable=codigo_tipo_var, value="qrcode").pack(
+        side=tk.LEFT, padx=(12, 0)
+    )
+
     tk.Label(frm, text="S/N", font=("Arial", 11)).pack(anchor="w")
     entry_sn = tk.Entry(frm, font=("Arial", 18))
     entry_sn.pack(fill=tk.X, pady=(0, 4))
@@ -301,9 +417,10 @@ def main() -> None:
                 "Instale uma impressora no Windows ou prima «Atualizar» depois de a ligar.",
             )
             return "break"
+        tipo_cod: CodigoEtiqueta = "qrcode" if codigo_tipo_var.get() == "qrcode" else "barcode"
         try:
-            imprimir(sn, codigo_atual[0], descricao_atual[0], nome_imp)
-            _guardar_impressora_preferida(nome_imp)
+            imprimir(sn, codigo_atual[0], descricao_atual[0], nome_imp, tipo_cod)
+            _guardar_config(impressora=nome_imp, codigo=tipo_cod)
             refresh_pref_label()
         except Exception as e:
             messagebox.showerror(

@@ -1,0 +1,2 @@
+impressora=Microsoft Print to PDF
+codigo=barcode
